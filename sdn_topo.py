@@ -1,69 +1,120 @@
+
 from mininet.net import Mininet
-from mininet.topo import SingleSwitchTopo
+from mininet.topo import Topo
 from mininet.node import RemoteController
-from mininet.link import TCLink
-import re
+from mininet.cli import CLI
 import time
+import re
 
-def get_bandwidth(output):
-    match = re.search(r'(\d+\.\d+)\s+Gbits/sec', output)
-    return float(match.group(1)) if match else 0.0
-
+class SingleTopo(Topo):
+    def build(self):
+        switch = self.addSwitch('s1')
+        for h in range(1, 17):
+            host = self.addHost(f'h{h}')
+            self.addLink(host, switch)
+class LinearTopo(Topo):
+    def build(self):
+        prev = None
+        for i in range(1,17):
+            host = self.addHost(f'h{i}')
+            switch = self.addSwitch(f's{i}')
+            self.addLink(host,switch)
+            if prev:
+                self.addLink(switch,prev)
+            prev=switch
+class TreeTopo(Topo):
+    def build(self):
+        core_switch = self.addSwitch('s1')
+        agg_switches = []
+        for i in range(4):
+            agg = self.addSwitch(f's{i+2}')
+            agg_switches.append(agg)
+            self.addLink(core_switch,agg)
+        hId = 1
+        for agg in agg_switches:
+            for _ in range(4):
+                host = self.addHost(f'h{hId}')
+                self.addLink(host,agg)
+                hId += 1
 def get_rtt(output):
     rtt_line = re.search(r'rtt min/avg/max/mdev = ([\d\.]+)/[\d\.]+/([\d\.]+)/', output)
     if rtt_line:
         return float(rtt_line.group(1)), float(rtt_line.group(2))
     return None, None
-
 def measure_ptr(h1, h2, packet_count):
     h2.cmd('iperf -s -u -p 5001 &')
     time.sleep(1)
     start = time.time()
-    h1.cmd(f'iperf -c {h2.IP()} -u -p 5001 -b 10M -l 1400 -t {packet_count//5}')  # Duration roughly proportional
+    h1.cmd(f'iperf -c {h2.IP()} -u -p 5001 -b 10M -l 1400 -t {packet_count//5}') 
     end = time.time()
-    return round((end - start) * 1000, 2)  # in ms
+    return round((end - start) * 1000, 2) 
 
 def measure_rtt(h1, h2, count):
     output = h1.cmd(f'ping -c {count} {h2.IP()}')
     return get_rtt(output)
-
-if __name__ == '__main__':
-    net = Mininet(topo=SingleSwitchTopo(k=16), controller=RemoteController, link=TCLink)
-    net.start()
-    hosts = net.hosts
-
-    min_bw = float('inf')
-    min_pair = ()
-
-    # Start iperf servers
-    for h in hosts:
-        h.cmd('iperf -s -p 5001 &')
-
-    print("📶 Measuring Bandwidth between all host pairs...")
-    for i in range(len(hosts)):
-        for j in range(i+1, len(hosts)):
-            h1, h2 = hosts[i], hosts[j]
-            output = h1.cmd(f'iperf -c {h2.IP()} -p 5001 -t 3')
-            bw = get_bandwidth(output)
-            print(f'{h1.name} -> {h2.name}: {bw:.2f} Gbps')
-            if bw < min_bw:
-                min_bw = bw
-                min_pair = (h1.name, h2.name)
-
-    print(f'\n🔻 Minimum Bandwidth: {min_bw:.2f} Gbps between {min_pair[0]} and {min_pair[1]}')
-
-    # Measure PTR and RTT for a fixed pair (e.g., h1 -> h2)
-    h1, h2 = hosts[0], hosts[1]
-    packet_counts = [5, 10, 20, 30, 50, 100]
-
-    print("\n📦 Measuring Packet Transmission Rate (PTR):")
-    for count in packet_counts:
+    
+def measure_bandwidth(net):
+   hosts = [net.get(f'h{i}') for i in range(1,17)]
+   results = []
+   for i in range(len(hosts)):
+        for j in range(i+1,len(hosts)):
+            h1=hosts[i]
+            h2=hosts[j]
+            print(f"Testing {h1.name} -> {h2.name}...")
+            h2.cmd('iperf -s &')
+            output = h1.cmd(f'iperf -c {h2.IP()} -n 2G')
+            h2.cmd('kill %iperf')
+            match = re.search(r'(\d+\.?\d*)\s+(Gbits|Mbits)/sec',output)
+            if match:
+                bw = float(match.group(1))
+                if match.group(2)=="Mbits":
+                    bw/=1000
+                results.append(bw)
+                print(f"Bandwidth: {bw} Gbps\n")
+            else:
+                print("Bandwidth not found")
+            
+   if results:
+        print(f"Maximum Bandwidth : {max(results)} Gbps")
+        print(f"Minimum Bandwidth : {min(results)} Gbps")
+   else:
+        print("Bandwidth not found")
+   h1, h2 = hosts[0], hosts[15]
+   packet_counts = [5, 10, 20, 30, 50, 100]
+   print("\n Measuring Packet Transmission Rate (PTR):")
+   for count in packet_counts:
         duration = measure_ptr(h1, h2, count)
         print(f'{count} packets: {duration} ms')
 
-    print("\n⏱️ Measuring Round Trip Time (RTT):")
-    for count in packet_counts:
+   print("\n Measuring Round Trip Time (RTT):")
+   for count in packet_counts:
         min_rtt, max_rtt = measure_rtt(h1, h2, count)
         print(f'{count} pings: Min RTT = {min_rtt} ms | Max RTT = {max_rtt} ms')
 
+      
+                
+                
+
+def main():
+    print("\n Choose a Mininet Topology:")
+    print("1. Single Topology")
+    print("2. Linear Topology")
+    print("3. Tree Topology")
+    choice = input("Enter your choice(1/2/3): ").strip()
+    if choice == '1':
+        topo = SingleTopo()
+    elif choice == '2':
+        topo = LinearTopo()
+    elif choice == '3':
+        topo = TreeTopo()
+    else :
+        print("Invalid choice! Exiting.")
+        return
+    net = Mininet(topo=topo,controller=RemoteController)
+    net.start()
+    print("\n Network is established")
+    measure_bandwidth(net)
+    CLI(net)
     net.stop()
+if __name__ == '__main__':
+    main()
